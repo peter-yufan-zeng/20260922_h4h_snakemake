@@ -1,0 +1,6 @@
+# Optional local development/testing only. On h4h, load snakemake/7.3.8.
+# This profile uses the Snakemake 7 cluster interface (not compatible with 8/9).
+snakemake==7.3.8
+pulp==2.7.0
+# Snakemake 7.3.8 requires the older table-formatting behavior.
+tabulate==0.8.10

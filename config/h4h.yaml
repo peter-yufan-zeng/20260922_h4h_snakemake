@@ -1,0 +1,22 @@
+# All relative paths are relative to the working directory (the project checkout).
+input: config/samples.tsv
+outdir: results
+# Use shared project storage, never node-local /tmp.
+tmpdir: work/tmp
+modules_init: /etc/profile.d/modules.sh  # Change if h4h initializes modules elsewhere.
+modules:
+  fastqc: [FastQC]
+  trim: [cutadapt, trim_galore]
+  star: [star]
+  rsem: [rsem, samtools]
+  multiqc: [multiqc]
+reference:
+  # Inferred from the directory listing supplied; verify on a compute node.
+  fasta: /cluster/tools/data/genomes/mouse/bwa/mm10.fasta
+  # User-supplied mm10 iGenomes annotation; preflight checks FASTA compatibility.
+  gtf: /cluster/tools/data/genomes/mouse/mm10/iGenomes/Annotation/Genes/genes.gtf
+  # Built from the same FASTA/GTF using the selected modules; do not use BWA indexes.
+  index_dir: work/reference/mm10
+  sjdb_overhang: 100  # Set to maximum read length minus 1 before building indexes.
+# RSEM strandedness: none, forward, or reverse. Confirm your library preparation.
+strandedness: none

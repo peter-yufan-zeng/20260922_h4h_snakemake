@@ -1,0 +1,6 @@
+.snakemake/
+.venv/
+__pycache__/
+results/
+work/
+logs/

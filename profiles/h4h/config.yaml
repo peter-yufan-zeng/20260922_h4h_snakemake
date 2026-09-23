@@ -1,0 +1,14 @@
+# Run from the project root after loading snakemake/7.3.8.
+cluster: 'python scripts/slurm_submit.py'
+cluster-status: 'python scripts/slurm_status.py'
+cluster-cancel: scancel
+jobs: 20
+local-cores: 1
+latency-wait: 120
+max-jobs-per-second: 2
+max-status-checks-per-second: 1
+rerun-incomplete: true
+keep-going: true
+printshellcmds: true
+show-failed-logs: true
+scheduler: greedy

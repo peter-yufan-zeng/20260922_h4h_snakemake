@@ -1,0 +1,189 @@
+"""h4h module adaptation of AN_WGS_script/run_rnaseq_mouse.snk."""
+import os
+import shlex
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(workflow.basedir) / 'scripts'))
+from workflow_utils import read_samples
+
+configfile: 'config/h4h.yaml'
+
+SAMPLES = read_samples(config['input'])
+OUT = str(Path(config['outdir']).resolve())
+REF = str(Path(config['reference']['index_dir']).resolve())
+FASTA = str(Path(config['reference']['fasta']).expanduser().resolve())
+GTF = str(Path(config['reference']['gtf']).expanduser().resolve())
+TMP = str(Path(config['tmpdir']).resolve())
+if config['strandedness'] not in ('none', 'forward', 'reverse'):
+    raise ValueError('strandedness must be none, forward, or reverse')
+OVERHANG = int(config['reference']['sjdb_overhang'])
+if OVERHANG < 1:
+    raise ValueError('sjdb_overhang must be positive')
+for directory_path in (OUT, REF, TMP):
+    if Path(directory_path).is_relative_to('/cluster/tools'):
+        raise ValueError('Output, index and temporary directories must be writable project storage.')
+
+shell.executable('/bin/bash')
+# Prefix runs in each tool shell, before module load. Each job has private shared scratch.
+shell.prefix(
+    'set -euo pipefail; '
+    'if ! type module >/dev/null 2>&1; then source ' + shlex.quote(config['modules_init']) + '; fi; '
+    'mkdir -p ' + shlex.quote(TMP) + '; '
+    'export TMPDIR=$(mktemp -d ' + shlex.quote(TMP + '/rnaseq.XXXXXXXX') + '); '
+    'export TMP="$TMPDIR" TEMP="$TMPDIR"; '
+    'trap \'rm -rf -- "$TMPDIR"\' EXIT; '
+)
+
+
+def modules(key):
+    names = config['modules'][key]
+    if not isinstance(names, list) or not names:
+        raise ValueError(f'modules.{key} must be a non-empty list')
+    return 'module purge; module load ' + ' '.join(shlex.quote(x) for x in names) + ';'
+
+
+localrules: all
+
+rule all:
+    input:
+        expand(OUT + '/QC/fastqc/{sample}_{mate}_fastqc.html', sample=SAMPLES, mate=['R1', 'R2']),
+        expand(OUT + '/align/{sample}_Aligned.toTranscriptome.out.bam', sample=SAMPLES),
+        expand(OUT + '/rsem/{sample}.{kind}.results', sample=SAMPLES, kind=['genes', 'isoforms']),
+        OUT + '/QC/multiqc_report.html'
+
+rule star_generate_reference:
+    input: fasta=FASTA, gtf=GTF
+    output: index=directory(REF + '/star')
+    params: modules=modules('star'), overhang=OVERHANG
+    threads: 8
+    resources: mem_mb=80000, time=240, partition='veryhimem'
+    log: OUT + '/logs/reference/star.log'
+    shell:
+        r"""
+        {params.modules}
+        mkdir -p {output.index:q}
+        STAR --runMode genomeGenerate --runThreadN {threads} \
+          --genomeDir {output.index:q} --genomeFastaFiles {input.fasta:q} \
+          --sjdbGTFfile {input.gtf:q} --sjdbOverhang {params.overhang} \
+          --limitGenomeGenerateRAM 75000000000 \
+          --outFileNamePrefix {output.index:q}/ > {log:q} 2>&1
+        """
+
+rule rsem_generate_reference:
+    input: fasta=FASTA, gtf=GTF
+    output: index=directory(REF + '/rsem')
+    params: modules=modules('rsem')
+    threads: 4
+    resources: mem_mb=16000, time=240, partition='all'
+    log: OUT + '/logs/reference/rsem.log'
+    shell:
+        r"""
+        {params.modules}
+        mkdir -p {output.index:q}
+        rsem-prepare-reference --gtf {input.gtf:q} --num-threads {threads} \
+          {input.fasta:q} {output.index:q}/mouse > {log:q} 2>&1
+        """
+
+rule merge_fastq:
+    input: lambda wc: SAMPLES[wc.sample][wc.mate.lower()]
+    output: temp(OUT + '/ln/{sample}_{mate}.fq.gz')
+    wildcard_constraints: mate='R[12]'
+    threads: 1
+    resources: mem_mb=1024, time=120, partition='all'
+    shell: 'cat {input:q} > {output:q}'
+
+rule fastqc:
+    input: r1=OUT + '/ln/{sample}_R1.fq.gz', r2=OUT + '/ln/{sample}_R2.fq.gz'
+    output:
+        r1_html=OUT + '/QC/fastqc/{sample}_R1_fastqc.html',
+        r2_html=OUT + '/QC/fastqc/{sample}_R2_fastqc.html',
+        r1_zip=OUT + '/QC/fastqc/{sample}_R1_fastqc.zip',
+        r2_zip=OUT + '/QC/fastqc/{sample}_R2_fastqc.zip'
+    params: modules=modules('fastqc'), out=OUT + '/QC/fastqc'
+    threads: 2
+    resources: mem_mb=4000, time=120, partition='all'
+    log: OUT + '/logs/fastqc/{sample}.log'
+    shell: '{params.modules} fastqc -t {threads} --outdir {params.out:q} {input:q} > {log:q} 2>&1'
+
+rule trim_galore:
+    input: r1=OUT + '/ln/{sample}_R1.fq.gz', r2=OUT + '/ln/{sample}_R2.fq.gz'
+    output:
+        r1=temp(OUT + '/trimmed/{sample}_R1_val_1.fq.gz'),
+        r2=temp(OUT + '/trimmed/{sample}_R2_val_2.fq.gz'),
+        report1=OUT + '/trimmed/{sample}_R1.fq.gz_trimming_report.txt',
+        report2=OUT + '/trimmed/{sample}_R2.fq.gz_trimming_report.txt'
+    params: modules=modules('trim'), out=OUT + '/trimmed'
+    # Trim Galore launches helper processes; --cores 1 is deliberately conservative.
+    threads: 6
+    resources: mem_mb=8000, time=240, partition='all'
+    log: OUT + '/logs/trim_galore/{sample}.log'
+    shell:
+        '{params.modules} trim_galore --paired --gzip --cores 1 '
+        '--output_dir {params.out:q} {input.r1:q} {input.r2:q} > {log:q} 2>&1'
+
+rule star:
+    input:
+        r1=OUT + '/trimmed/{sample}_R1_val_1.fq.gz',
+        r2=OUT + '/trimmed/{sample}_R2_val_2.fq.gz',
+        index=REF + '/star'
+    output:
+        bam=OUT + '/align/{sample}_Aligned.toTranscriptome.out.bam',
+        junction=OUT + '/align/{sample}_Chimeric.out.junction',
+        final_log=OUT + '/align/{sample}_Log.final.out',
+        unmapped1=temp(OUT + '/align/{sample}_Unmapped.out.mate1'),
+        unmapped2=temp(OUT + '/align/{sample}_Unmapped.out.mate2')
+    params: modules=modules('star'), prefix=lambda wc: OUT + '/align/' + wc.sample + '_'
+    threads: 8
+    resources: mem_mb=48000, time=240, partition='himem'
+    log: OUT + '/logs/star/{sample}.log'
+    shell:
+        r"""
+        {params.modules}
+        STAR --genomeDir {input.index:q} --readFilesIn {input.r1:q} {input.r2:q} \
+          --outFileNamePrefix {params.prefix:q} --outTmpDir "$TMPDIR/STAR" \
+          --runThreadN {threads} --readFilesCommand zcat \
+          --outReadsUnmapped Fastx --quantMode TranscriptomeSAM \
+          --quantTranscriptomeBan IndelSoftclipSingleend --outSAMtype None \
+          --twopassMode Basic --outSAMstrandField intronMotif --outSAMunmapped Within \
+          --chimSegmentMin 12 --chimJunctionOverhangMin 12 --chimOutJunctionFormat 1 --chimOutType Junctions \
+          --alignSJDBoverhangMin 10 --alignMatesGapMax 100000 --alignIntronMax 100000 \
+          --alignSJstitchMismatchNmax 5 -1 5 5 --outSAMattrRGline ID:GRPundef \
+          --chimMultimapScoreRange 3 --chimScoreJunctionNonGTAG -4 \
+          --chimMultimapNmax 20 --chimNonchimScoreDropMin 10 \
+          --peOverlapNbasesMin 12 --peOverlapMMp 0.1 > {log:q} 2>&1
+        """
+
+rule rsem:
+    input: bam=OUT + '/align/{sample}_Aligned.toTranscriptome.out.bam', index=REF + '/rsem'
+    output:
+        genes=OUT + '/rsem/{sample}.genes.results',
+        isoforms=OUT + '/rsem/{sample}.isoforms.results',
+        genome_bam=OUT + '/rsem/{sample}.genome.bam',
+        transcript_bam=OUT + '/rsem/{sample}.transcript.bam'
+    params:
+        modules=modules('rsem'), strandedness=config['strandedness'],
+        prefix=lambda wc: OUT + '/rsem/' + wc.sample
+    threads: 8
+    resources: mem_mb=16000, time=240, partition='all'
+    log: OUT + '/logs/rsem/{sample}.log'
+    shell:
+        r"""
+        {params.modules}
+        rsem-calculate-expression --time --output-genome-bam -p {threads} \
+          --alignments --paired-end --strandedness {params.strandedness} \
+          --temporary-folder "$TMPDIR/rsem" {input.bam:q} \
+          {input.index:q}/mouse {params.prefix:q} > {log:q} 2>&1
+        """
+
+rule multiqc:
+    input:
+        fastqc=expand(OUT + '/QC/fastqc/{sample}_{mate}_fastqc.zip', sample=SAMPLES, mate=['R1', 'R2']),
+        trim=expand(OUT + '/trimmed/{sample}_{mate}.fq.gz_trimming_report.txt', sample=SAMPLES, mate=['R1', 'R2']),
+        star=expand(OUT + '/align/{sample}_Log.final.out', sample=SAMPLES)
+    output: html=OUT + '/QC/multiqc_report.html', data=directory(OUT + '/QC/multiqc_data')
+    params: modules=modules('multiqc'), out=OUT + '/QC'
+    threads: 1
+    resources: mem_mb=4000, time=60, partition='all'
+    log: OUT + '/logs/multiqc.log'
+    shell: '{params.modules} multiqc --force --outdir {params.out:q} {input:q} > {log:q} 2>&1'
