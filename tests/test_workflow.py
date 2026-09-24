@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from workflow_utils import read_samples, check_reference
+from workflow_utils import read_samples, check_reference, path_is_within
 from slurm_status import status
 from slurm_submit import command
 
@@ -24,6 +24,18 @@ class Inputs(unittest.TestCase):
         path = self.root / 'samples.tsv'
         path.write_text(text)
         return path
+
+    def test_path_guard_without_new_pathlib_api(self):
+        with patch.object(Path, 'is_relative_to', None, create=True):
+            self.assertTrue(path_is_within('/cluster/tools', '/cluster/tools'))
+            self.assertTrue(path_is_within('/cluster/tools/data', '/cluster/tools'))
+            self.assertFalse(path_is_within('/cluster/tools-other', '/cluster/tools'))
+            self.assertFalse(path_is_within('/cluster/tools/../projects', '/cluster/tools'))
+            target = self.root / 'protected'
+            target.mkdir()
+            alias = self.root / 'alias'
+            alias.symlink_to(target, target_is_directory=True)
+            self.assertTrue(path_is_within(alias / 'data', target))
 
     def test_multi_lane_order(self):
         data = read_samples(self.sheet('Sample\tFastq1\tFastq2\ns1\ta.fq.gz\tb.fq.gz\ns1\tc.fq.gz\td.fq.gz\n'))

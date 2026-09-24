@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import tempfile
 import yaml
-from workflow_utils import read_samples, check_reference
+from workflow_utils import read_samples, check_reference, path_is_within
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
         raise ValueError('sjdb_overhang must be positive')
     for directory in (cfg['outdir'], cfg['tmpdir'], cfg['reference']['index_dir']):
         path = Path(directory).resolve()
-        if path.is_relative_to('/cluster/tools'):
+        if path_is_within(path, '/cluster/tools'):
             raise ValueError('Never write outputs or indexes into /cluster/tools')
         path.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=path):

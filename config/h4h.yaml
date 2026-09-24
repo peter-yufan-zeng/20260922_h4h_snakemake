@@ -5,9 +5,9 @@ outdir: results
 tmpdir: work/tmp
 modules_init: /etc/profile.d/modules.sh  # Change if h4h initializes modules elsewhere.
 modules:
-  fastqc: [FastQC]
+  fastqc: [fastqc/0.12.1]
   trim: [cutadapt, trim_galore]
-  star: [star]
+  star: [STAR/2.7.9a]
   rsem: [rsem, samtools]
   multiqc: [multiqc]
 reference:

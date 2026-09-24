@@ -2,7 +2,7 @@
 
 Adapted from [AN_WGS_script/run_rnaseq_mouse.snk](https://github.com/peter-yufan-zeng/AN_WGS_script/blob/c0fe2a982cd09a9e6cec956141f0dd0f066bcaa9/run_rnaseq_mouse.snk), upstream commit `c0fe2a982cd09a9e6cec956141f0dd0f066bcaa9`, using the supplied h4h Slurm guide and module/reference listings.
 
-The workflow retains paired-end lane merging → FastQC → Trim Galore → STAR two-pass alignment → RSEM gene/isoform expression. It adds MultiQC and uses `FastQC`, `cutadapt`, `trim_galore`, `star`, `rsem`, `samtools`, and `multiqc` modules. Each tool job initializes the module system, purges inherited modules, and loads its configured module list. No containers, reference downloads, Niagara paths, or `REF_DIR`/`BBUFFER` environment variables are needed.
+The workflow retains paired-end lane merging → FastQC → Trim Galore → STAR two-pass alignment → RSEM gene/isoform expression. It adds MultiQC and uses `fastqc/0.12.1`, `cutadapt`, `trim_galore`, `STAR/2.7.9a`, `rsem`, `samtools`, and `multiqc` modules. Each tool job initializes the module system, purges inherited modules, and loads its configured module list. No containers, reference downloads, Niagara paths, or `REF_DIR`/`BBUFFER` environment variables are needed. The supplied h4h listings confirm lowercase `fastqc` and uppercase `STAR`; both are pinned to available versions.
 
 ## Configure before running
 
@@ -73,7 +73,7 @@ Main results:
 
 - `results/QC/fastqc/`: reports for both raw mates; `results/QC/multiqc_report.html`: aggregated QC.
 - `results/align/`: transcriptome BAMs, STAR final logs, and chimeric junctions. Alignment parameters are retained; unused large genomic SAM output is suppressed. Transcriptome alignments retain STAR's RSEM-compatible filtering and are not coordinate-sorted.
-- `results/rsem/`: genes/isoforms results plus genome/transcript BAMs from RSEM.
+- `results/rsem/`: genes/isoforms results and transcript BAMs from RSEM. Genome BAM conversion is an optional separate target.
 - `results/logs/` and `logs/slurm/`: tool and scheduler logs.
 
 Merged reads, trimmed reads, and unmapped FASTQs are marked temporary and removed by Snakemake after their consumers finish. Each tool shell uses private temporary space under configured project `tmpdir`; the controller uses `work/tmp`. Normal exits clean private scratch. Slurm SIGKILL/node failure may leave scratch behind; remove only directories from jobs confirmed finished. Indexes and principal results are retained.
@@ -82,7 +82,7 @@ The original optional Kraken/Bracken include is omitted: neither module was list
 
 ## Local verification
 
-Validated with Python 3.10.9 and Snakemake 7.3.8: all 10 regression checks and the 16-job synthetic dry run passed. The launcher defaults to the h4h modules `python3/3.10.9` and `snakemake/7.3.8`. Site module execution still needs verification on h4h.
+Validated with Python 3.10.9 and Snakemake 7.3.8: all 11 regression checks and the 16-job synthetic dry run passed. The launcher defaults to the h4h modules `python3/3.10.9` and `snakemake/7.3.8`. Site module execution still needs verification on h4h.
 
 After loading the h4h runner modules (or in the local test environment), run:
 
@@ -97,3 +97,44 @@ The dry run creates tiny two-sample/multi-lane fixtures and checks the complete 
 The status helper treats empty accounting results as pending, never successful. If `sacct` is unavailable persistently, a completed job may remain pending in Snakemake; investigate scheduler accounting rather than treating an unknown job as successful.
 
 References: [Snakemake 7 cluster options](https://snakemake.readthedocs.io/en/v7.3.8/executing/cli.html), [STAR manual](https://github.com/alexdobin/STAR/blob/master/doc/STARmanual.pdf), [RSEM documentation](https://github.com/deweylab/RSEM).
+
+## Python path-check compatibility
+
+If preflight reports `PosixPath has no attribute is_relative_to`, the selected `python` lacks that newer pathlib method. Check the interpreter after loading both modules with `python -c "import sys; print(sys.executable); print(sys.version)"`; the Snakemake module may select its own Python. The workflow and preflight now use a compatible containment helper. When updating an existing cluster checkout, copy `scripts/workflow_utils.py`, `scripts/preflight.py`, and `run_rnaseq_mouse.snk` together, then rerun preflight. This fixes the path check without changing module versions.
+
+## RSEM genome-conversion assertion
+
+The reported `rsem-tbam2gbam` failure (`BamConverter.h`, assertion `cqname != qname`) occurs in optional transcript-to-genome BAM conversion. In [RSEM's converter source](https://github.com/deweylab/RSEM/blob/master/BamConverter.h), that check is reached when an unmapped record has the same canonical read name as the preceding read group. The screenshot does not establish whether read-name collisions, unexpected BAM records, or a version-specific problem caused it. This is not evidence of insufficient RAM.
+
+The expression rule now omits `--output-genome-bam` and no longer declares a genome BAM output. It retains gene/isoform tables and the transcript BAM. This avoids the failing conversion; it does not repair or certify the input reads. The separate `rsem_genome_bam` rule preserves genome conversion as an explicitly requested target and will still fail if the underlying converter problem remains.
+
+Copy the updated `run_rnaseq_mouse.snk` to your cluster checkout; keep your cluster sample sheet and configuration. In a compute allocation, capture diagnostics for the affected sample (the name below is from the reported log):
+
+```bash
+module load rsem samtools
+rsem-calculate-expression --version
+samtools quickcheck -v results/align/Cntrl_1_Slide_1_Aligned.toTranscriptome.out.bam
+rsem-sam-validator results/align/Cntrl_1_Slide_1_Aligned.toTranscriptome.out.bam
+# If retained after the failed job, also validate RSEM's output:
+rsem-sam-validator results/rsem/Cntrl_1_Slide_1.transcript.bam
+```
+
+Quickcheck only checks basic BAM integrity; the RSEM validator checks alignment organization and does not prove FASTQ read IDs are unique. Do not coordinate-sort the transcriptome BAM or discard reads to silence the assertion. Investigate validation failures before trusting expression results. Share validator output and the RSEM version if the issue persists.
+
+To resume expression processing from the project root, reload the runner modules and inspect the dry run, then submit:
+
+```bash
+module load python3/3.10.9 snakemake/7.3.8
+snakemake -s run_rnaseq_mouse.snk --profile profiles/h4h --cores 8 --dry-run
+sbatch --chdir="$PWD" scripts/run_h4h.sh
+```
+
+The profile already enables `rerun-incomplete`. Existing complete STAR alignments and reference indexes can be reused. A genome BAM left by the failed conversion may be partial: its presence does not mean it succeeded. After diagnosing the converter issue, explicitly force that optional target to replace any partial output:
+
+```bash
+snakemake -s run_rnaseq_mouse.snk --profile profiles/h4h \
+  --forcerun "$PWD/results/rsem/Cntrl_1_Slide_1.genome.bam" \
+  -- "$PWD/results/rsem/Cntrl_1_Slide_1.genome.bam"
+```
+
+Run this optional command only from a compute allocation. It schedules a separate conversion job without making genome BAMs part of the default expression workflow.

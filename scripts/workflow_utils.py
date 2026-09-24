@@ -4,6 +4,15 @@ from pathlib import Path
 import re
 
 
+def path_is_within(path, parent):
+    """Check containment without Path.is_relative_to (unavailable before Python 3.9)."""
+    try:
+        Path(path).resolve().relative_to(Path(parent).resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def read_samples(filename):
     with open(filename, newline='') as handle:
         header = handle.readline()

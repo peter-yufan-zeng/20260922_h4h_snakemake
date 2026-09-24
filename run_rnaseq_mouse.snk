@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(workflow.basedir) / 'scripts'))
-from workflow_utils import read_samples
+from workflow_utils import read_samples, path_is_within
 
 configfile: 'config/h4h.yaml'
 
@@ -21,7 +21,7 @@ OVERHANG = int(config['reference']['sjdb_overhang'])
 if OVERHANG < 1:
     raise ValueError('sjdb_overhang must be positive')
 for directory_path in (OUT, REF, TMP):
-    if Path(directory_path).is_relative_to('/cluster/tools'):
+    if path_is_within(directory_path, '/cluster/tools'):
         raise ValueError('Output, index and temporary directories must be writable project storage.')
 
 shell.executable('/bin/bash')
@@ -159,7 +159,6 @@ rule rsem:
     output:
         genes=OUT + '/rsem/{sample}.genes.results',
         isoforms=OUT + '/rsem/{sample}.isoforms.results',
-        genome_bam=OUT + '/rsem/{sample}.genome.bam',
         transcript_bam=OUT + '/rsem/{sample}.transcript.bam'
     params:
         modules=modules('rsem'), strandedness=config['strandedness'],
@@ -170,11 +169,30 @@ rule rsem:
     shell:
         r"""
         {params.modules}
-        rsem-calculate-expression --time --output-genome-bam -p {threads} \
+        rsem-calculate-expression --time -p {threads} \
           --alignments --paired-end --strandedness {params.strandedness} \
           --temporary-folder "$TMPDIR/rsem" {input.bam:q} \
           {input.index:q}/mouse {params.prefix:q} > {log:q} 2>&1
         """
+
+
+# Optional output: request its absolute file path explicitly after validating the BAM.
+# A converter failure must not remove the independent expression results.
+rule rsem_genome_bam:
+    input:
+        bam=OUT + '/rsem/{sample}.transcript.bam',
+        index=REF + '/rsem'
+    output: bam=OUT + '/rsem/{sample}.genome.bam'
+    params: modules=modules('rsem')
+    threads: 1
+    resources: mem_mb=16000, time=240, partition='all'
+    log: OUT + '/logs/rsem_genome_bam/{sample}.log'
+    shell:
+        r"""
+        {params.modules}
+        rsem-tbam2gbam {input.index:q}/mouse {input.bam:q} {output.bam:q} > {log:q} 2>&1
+        """
+
 
 rule multiqc:
     input:

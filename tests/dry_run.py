@@ -32,5 +32,14 @@ with tempfile.TemporaryDirectory(prefix='h4h-dryrun-') as directory:
     config = root / 'config.yaml'
     config.write_text(yaml.safe_dump(cfg))
     subprocess.run(['python', 'scripts/preflight.py', '--config', str(config), '--skip-modules'], cwd=ROOT, check=True)
-    subprocess.run(['snakemake', '-s', 'run_rnaseq_mouse.snk', '--profile', 'profiles/h4h',
-                    '--configfile', str(config), '--cores', '8', '--dry-run', '--printshellcmds'], cwd=ROOT, check=True)
+    command = ['snakemake', '-s', 'run_rnaseq_mouse.snk', '--profile', 'profiles/h4h',
+               '--configfile', str(config), '--cores', '8', '--dry-run', '--printshellcmds']
+    result = subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
+    print(result.stdout)
+    assert '--output-genome-bam' not in result.stdout
+    assert 'rsem-tbam2gbam' not in result.stdout, 'Genome conversion must be optional'
+    result = subprocess.run(command + [str(root / 'results/rsem/mouse01.genome.bam')],
+                            cwd=ROOT, check=True, capture_output=True, text=True)
+    assert 'rsem-tbam2gbam' in result.stdout, 'Explicit genome BAM target must run conversion'
+    assert '--output-genome-bam' not in result.stdout
+    print('Optional genome BAM target dry run passed.')
